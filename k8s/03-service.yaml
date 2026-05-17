@@ -1,0 +1,24 @@
+# =============================================================================
+# compliance-api/03-service.yaml
+# =============================================================================
+# ClusterIP Service exposing the compliance API within the cluster.
+# Traffic flows: Ingress -> Service -> Pod:8000
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: compliance-api
+  namespace: compliance-api
+  labels:
+    app: compliance-api
+    app.kubernetes.io/name: compliance-api
+    app.kubernetes.io/part-of: compliance-api
+spec:
+  type: ClusterIP
+  selector:
+    app: compliance-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      protocol: TCP

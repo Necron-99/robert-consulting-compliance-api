@@ -1,0 +1,51 @@
+# =============================================================================
+# compliance-api/04-ingress.yaml
+# =============================================================================
+# ingress-nginx Ingress with cert-manager TLS certificate.
+#
+# cert-manager watches for Ingress resources with the cert-manager.io/cluster-issuer
+# annotation and automatically:
+#   1. Creates a Certificate resource
+#   2. Completes the Let's Encrypt HTTP-01 ACME challenge
+#   3. Stores the certificate in the specified TLS secret
+#   4. Renews automatically before expiry
+#
+# DNS must resolve api.compliance.robertconsulting.net to the Hetzner
+# floating IP before cert-manager can complete the ACME challenge.
+# The Route53 record is created by Terraform in compliance-api-iam.tf.
+#
+# CORS is handled at the application level (FastAPI middleware).
+# The ingress does not need CORS configuration.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: compliance-api
+  namespace: compliance-api
+  labels:
+    app: compliance-api
+    app.kubernetes.io/name: compliance-api
+    app.kubernetes.io/part-of: compliance-api
+  annotations:
+    # cert-manager: automatically provision and renew TLS certificate
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # ingress-nginx: force HTTPS redirect
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.compliance.robertconsulting.net
+      # cert-manager will create and manage this secret
+      secretName: compliance-api-tls
+  rules:
+    - host: api.compliance.robertconsulting.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: compliance-api
+                port:
+                  name: http

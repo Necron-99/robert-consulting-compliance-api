@@ -1,0 +1,26 @@
+# =============================================================================
+# compliance-api/01-cluster-issuer.yaml
+# =============================================================================
+# cert-manager ClusterIssuer for Let's Encrypt production certificates.
+# Uses HTTP-01 challenge — requires port 80 to be publicly accessible.
+#
+# Apply once per cluster, not per namespace.
+# Uses Let's Encrypt production endpoint — real trusted certificates.
+#
+# IMPORTANT: Change the email address if deploying to a different environment.
+# Let's Encrypt will send expiry warnings to this address.
+# =============================================================================
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: rsbailey@necron99.org
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx

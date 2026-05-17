@@ -1,0 +1,14 @@
+# =============================================================================
+# compliance-api/00-namespace.yaml
+# =============================================================================
+# Namespace for all compliance API resources.
+# Create this first before applying other manifests.
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: compliance-api
+  labels:
+    app.kubernetes.io/part-of: compliance-api
+    environment: production
+    managed-by: kubectl

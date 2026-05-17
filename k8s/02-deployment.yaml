@@ -1,0 +1,146 @@
+# =============================================================================
+# compliance-api/02-deployment.yaml
+# =============================================================================
+# Kubernetes Deployment for the compliance API FastAPI application.
+#
+# Architecture:
+#   Init container: fetches compliance.db from S3 using AWS CLI
+#   Main container: FastAPI serving the compliance database via REST API
+#
+# Database refresh pattern:
+#   1. Run export locally: python3 export_compliance_json.py --db ~/compliance.db
+#   2. Upload to S3: aws s3 cp ~/compliance.db s3://robert-consulting-compliance/data/compliance.db
+#   3. Restart pod:  kubectl rollout restart deployment/compliance-api -n compliance-api
+#   4. Init container fetches the new database on pod start
+#
+# The AWS credentials Secret must exist before applying this manifest.
+# Create it using the command from the Terraform output:
+#   compliance_api_setup_command
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compliance-api
+  namespace: compliance-api
+  labels:
+    app: compliance-api
+    app.kubernetes.io/name: compliance-api
+    app.kubernetes.io/part-of: compliance-api
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: compliance-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: compliance-api
+        app.kubernetes.io/name: compliance-api
+    spec:
+      # -----------------------------------------------------------------------
+      # Init container: fetch compliance.db from S3
+      # Runs before the main container starts on every pod creation/restart.
+      # Uses the official AWS CLI image — no custom image needed.
+      # -----------------------------------------------------------------------
+      initContainers:
+        - name: fetch-database
+          image: amazon/aws-cli:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "Fetching compliance.db from S3..."
+              aws s3 cp s3://$S3_BUCKET/$S3_KEY /data/compliance.db
+              echo "Database fetched: $(ls -lh /data/compliance.db)"
+              echo "SQLite check: $(file /data/compliance.db)"
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aws-compliance-api-credentials
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-compliance-api-credentials
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: AWS_DEFAULT_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: aws-compliance-api-credentials
+                  key: AWS_DEFAULT_REGION
+            - name: S3_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: aws-compliance-api-credentials
+                  key: S3_BUCKET
+            - name: S3_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-compliance-api-credentials
+                  key: S3_KEY
+          volumeMounts:
+            - name: database
+              mountPath: /data
+
+      # -----------------------------------------------------------------------
+      # Main container: FastAPI compliance API
+      # -----------------------------------------------------------------------
+      containers:
+        - name: compliance-api
+          image: ghcr.io/necron-99/compliance-api:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: DATABASE_PATH
+              value: /data/compliance.db
+            - name: CORS_ORIGINS
+              value: "https://compliance.robertconsulting.net,https://robertconsulting.net"
+            - name: LOG_LEVEL
+              value: "info"
+          volumeMounts:
+            - name: database
+              mountPath: /data
+              readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+      # -----------------------------------------------------------------------
+      # Shared volume between init container and main container
+      # emptyDir is ephemeral — database is re-fetched on every pod start
+      # -----------------------------------------------------------------------
+      volumes:
+        - name: database
+          emptyDir: {}
+
+      # Ensure pods are scheduled and restarted cleanly
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
