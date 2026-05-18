@@ -1,0 +1,237 @@
+# =============================================================================
+# kube-prometheus-stack Helm Values
+# Robert Consulting — k3s cluster (Hetzner CX33, nbg1)
+# =============================================================================
+# Chart: prometheus-community/kube-prometheus-stack
+# Docs:  https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack
+#
+# Install:
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm repo update
+#   helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#     --namespace monitoring \
+#     --create-namespace \
+#     --values k8s/monitoring/prometheus-stack-values.yaml
+#
+# Upgrade:
+#   helm upgrade kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#     --namespace monitoring \
+#     --values k8s/monitoring/prometheus-stack-values.yaml
+#
+# k3s-specific notes:
+#   - k3s uses a single binary embedding etcd, scheduler, controller-manager
+#     These components expose metrics on 127.0.0.1 only by default
+#     The kubeScheduler, kubeControllerManager, kubeEtcd monitors are disabled
+#     to avoid false alerts from unreachable endpoints
+#   - k3s ships its own CoreDNS and Traefik — Traefik is disabled in our install
+#   - local-path-provisioner is the default storage class
+#   - Node exporter runs as a DaemonSet on all nodes
+# =============================================================================
+
+# =============================================================================
+# PROMETHEUS
+# =============================================================================
+prometheus:
+  prometheusSpec:
+    # Retention: 30 days of metrics history
+    retention: 30d
+    retentionSize: "8GB"
+
+    # Resource limits — conservative for CX33 (4 vCPU, 8GB RAM)
+    resources:
+      requests:
+        memory: 256Mi
+        cpu: 100m
+      limits:
+        memory: 1Gi
+        cpu: 500m
+
+    # Persistent storage via local-path provisioner
+    # Data survives pod restarts (but not node deletion)
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+    # Scrape all ServiceMonitors and PodMonitors across all namespaces
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+    # External URL for Prometheus UI (via ingress)
+    externalUrl: "https://prometheus.robertconsulting.net"
+
+    # Additional scrape configs for compliance-api
+    # FastAPI exposes metrics at /metrics via prometheus-fastapi-instrumentator
+    additionalScrapeConfigs:
+      - job_name: 'compliance-api'
+        static_configs:
+          - targets: ['compliance-api.compliance-api.svc.cluster.local:80']
+        metrics_path: '/metrics'
+        scrape_interval: 30s
+
+# =============================================================================
+# GRAFANA
+# =============================================================================
+grafana:
+  # Admin credentials — change password after first login
+  adminUser: admin
+  adminPassword: "changeme-on-first-login"
+
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 50m
+    limits:
+      memory: 256Mi
+      cpu: 200m
+
+  # Persistent storage for dashboards and settings
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    size: 2Gi
+
+  # External URL
+  grafana.ini:
+    server:
+      root_url: "https://grafana.robertconsulting.net"
+      domain: "grafana.robertconsulting.net"
+    security:
+      # Allow embedding in iframes (useful for portfolio demos)
+      allow_embedding: true
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+
+  # Pre-install useful dashboards from grafana.com
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: 'grafana-dashboards-kubernetes'
+          orgId: 1
+          folder: 'Kubernetes'
+          type: file
+          disableDeletion: true
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/grafana-dashboards-kubernetes
+        - name: 'grafana-dashboards-node'
+          orgId: 1
+          folder: 'Infrastructure'
+          type: file
+          disableDeletion: true
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/grafana-dashboards-node
+
+  dashboards:
+    grafana-dashboards-kubernetes:
+      # Kubernetes cluster overview
+      k8s-system-api-server:
+        url: https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-system-api-server.json
+        token: ''
+      k8s-views-global:
+        url: https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-views-global.json
+        token: ''
+      k8s-views-namespaces:
+        url: https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-views-namespaces.json
+        token: ''
+      k8s-views-nodes:
+        url: https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-views-nodes.json
+        token: ''
+      k8s-views-pods:
+        url: https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-views-pods.json
+        token: ''
+    grafana-dashboards-node:
+      # Node Exporter Full — detailed host metrics
+      node-exporter-full:
+        gnetId: 1860
+        revision: 37
+        datasource: Prometheus
+
+  # Ingress for Grafana UI
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    hosts:
+      - grafana.robertconsulting.net
+    tls:
+      - secretName: grafana-tls
+        hosts:
+          - grafana.robertconsulting.net
+
+# =============================================================================
+# ALERTMANAGER
+# =============================================================================
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        memory: 64Mi
+        cpu: 10m
+      limits:
+        memory: 128Mi
+        cpu: 100m
+
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 1Gi
+
+# =============================================================================
+# NODE EXPORTER — host metrics (CPU, memory, disk, network)
+# =============================================================================
+prometheus-node-exporter:
+  resources:
+    requests:
+      memory: 32Mi
+      cpu: 10m
+    limits:
+      memory: 64Mi
+      cpu: 100m
+
+# =============================================================================
+# KUBE STATE METRICS — Kubernetes object metrics
+# =============================================================================
+kube-state-metrics:
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 10m
+    limits:
+      memory: 128Mi
+      cpu: 100m
+
+# =============================================================================
+# k3s COMPATIBILITY — disable monitors for components not exposed in k3s
+# k3s embeds scheduler, controller-manager, and etcd in a single binary
+# and exposes their metrics on 127.0.0.1 only — disable to avoid alerts
+# =============================================================================
+kubeScheduler:
+  enabled: false
+
+kubeControllerManager:
+  enabled: false
+
+kubeEtcd:
+  enabled: false
+
+kubeProxy:
+  enabled: false
+
+# CoreDNS metrics are accessible in k3s
+coreDns:
+  enabled: true

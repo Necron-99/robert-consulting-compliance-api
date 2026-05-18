@@ -1,0 +1,41 @@
+# =============================================================================
+# k8s/monitoring/prometheus-ingress.yaml
+# =============================================================================
+# Ingress for the Prometheus UI.
+# Grafana ingress is configured in the Helm values file.
+# Apply AFTER helm install completes.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app: prometheus
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Basic auth to protect Prometheus UI from public access
+    # Generate with: htpasswd -nb admin <password> | base64
+    # Then create secret: kubectl create secret generic prometheus-basic-auth \
+    #   --from-file=auth=/tmp/auth --namespace monitoring
+    # nginx.ingress.kubernetes.io/auth-type: basic
+    # nginx.ingress.kubernetes.io/auth-secret: prometheus-basic-auth
+    # nginx.ingress.kubernetes.io/auth-realm: "Prometheus — Authentication Required"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - prometheus.robertconsulting.net
+      secretName: prometheus-tls
+  rules:
+    - host: prometheus.robertconsulting.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kube-prometheus-stack-prometheus
+                port:
+                  number: 9090

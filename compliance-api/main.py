@@ -34,6 +34,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 
 # =============================================================================
 # Configuration
@@ -134,6 +135,8 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
+# Prometheus metrics endpoint at /metrics
+Instrumentator().instrument(app).expose(app)
 
 # =============================================================================
 # Health
