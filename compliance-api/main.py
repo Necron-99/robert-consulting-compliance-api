@@ -34,7 +34,6 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_fastapi_instrumentator import Instrumentator
 
 # =============================================================================
 # Configuration
@@ -135,8 +134,6 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
-# Prometheus metrics endpoint at /metrics
-Instrumentator().instrument(app).expose(app)
 
 # =============================================================================
 # Health
@@ -464,3 +461,190 @@ def search_controls(
         "pages": (total + page_size - 1) // page_size,
         "results": results,
     }
+
+# =============================================================================
+# ATT&CK Technique Mappings
+# =============================================================================
+
+@app.get("/attack/techniques", tags=["attack"])
+def list_attack_techniques(
+    tactic: Optional[str] = Query(default=None, description="Filter by NIST control family e.g. AC, SC, IA"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=500),
+):
+    """
+    List all ATT&CK techniques that have NIST 800-53 mitigations.
+    Optionally filter by NIST control family (tactic_group).
+    """
+    where = "WHERE tactic_group = ?" if tactic else ""
+    params = (tactic.upper(),) if tactic else ()
+
+    total = query_one(
+        f"SELECT COUNT(DISTINCT technique_id) as n FROM attack_technique_mappings {where}",
+        params
+    )["n"]
+
+    offset = (page - 1) * page_size
+    results = query(
+        f"""SELECT technique_id, technique_name,
+               GROUP_CONCAT(DISTINCT tactic_group) as tactic_groups,
+               COUNT(*) as control_count
+            FROM attack_technique_mappings
+            {where}
+            GROUP BY technique_id, technique_name
+            ORDER BY technique_id
+            LIMIT ? OFFSET ?""",
+        params + (page_size, offset)
+    )
+
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": (total + page_size - 1) // page_size,
+        "techniques": results,
+    }
+
+
+@app.get("/attack/techniques/{technique_id}", tags=["attack"])
+def get_technique(technique_id: str):
+    """
+    Get a specific ATT&CK technique and all NIST 800-53 controls that mitigate it,
+    with transitive compliance framework coverage via existing cross-framework mappings.
+    """
+    technique_id = technique_id.upper()
+
+    # Get direct NIST mappings
+    nist_mappings = query(
+        """SELECT atm.nist_control_id, atm.tactic_group, atm.comments,
+                  fc.id as fc_id, fc.name as control_name, fc.description
+           FROM attack_technique_mappings atm
+           LEFT JOIN framework_controls fc ON atm.nist_control_fk = fc.id
+           WHERE atm.technique_id = ?
+           ORDER BY atm.nist_control_id""",
+        (technique_id,)
+    )
+
+    if not nist_mappings:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Technique '{technique_id}' not found or has no NIST mitigations"
+        )
+
+    technique_name = query_one(
+        "SELECT technique_name FROM attack_technique_mappings WHERE technique_id = ? LIMIT 1",
+        (technique_id,)
+    )["technique_name"]
+
+    # For each NIST control, get transitive framework coverage
+    # Shows which other frameworks also have controls mapped to these NIST controls
+    fc_ids = [m["fc_id"] for m in nist_mappings if m["fc_id"]]
+    transitive_coverage = {}
+
+    if fc_ids:
+        placeholders = ",".join("?" * len(fc_ids))
+        # Controls that these NIST controls map TO (outbound from NIST)
+        outbound = query(
+            f"""SELECT DISTINCT f.code as framework, COUNT(*) as count
+                FROM mappings m
+                JOIN framework_controls fc ON m.target_control_id = fc.id
+                JOIN frameworks f ON fc.framework_id = f.id
+                WHERE m.source_control_id IN ({placeholders})
+                AND f.code != 'NIST-800-53'
+                GROUP BY f.code
+                ORDER BY count DESC""",
+            tuple(fc_ids)
+        )
+        # Controls that map TO these NIST controls (inbound)
+        inbound = query(
+            f"""SELECT DISTINCT f.code as framework, COUNT(*) as count
+                FROM mappings m
+                JOIN framework_controls fc ON m.source_control_id = fc.id
+                JOIN frameworks f ON fc.framework_id = f.id
+                WHERE m.target_control_id IN ({placeholders})
+                AND f.code != 'NIST-800-53'
+                GROUP BY f.code
+                ORDER BY count DESC""",
+            tuple(fc_ids)
+        )
+        transitive_coverage = {
+            "frameworks_with_mapped_controls": outbound + inbound
+        }
+
+    return {
+        "technique_id": technique_id,
+        "technique_name": technique_name,
+        "nist_control_count": len(nist_mappings),
+        "nist_controls": nist_mappings,
+        "transitive_framework_coverage": transitive_coverage,
+    }
+
+
+@app.get("/attack/search", tags=["attack"])
+def search_techniques(
+    q: str = Query(..., min_length=2, description="Search technique name"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+):
+    """Search ATT&CK techniques by name."""
+    search_term = f"%{q}%"
+    total = query_one(
+        """SELECT COUNT(DISTINCT technique_id) as n
+           FROM attack_technique_mappings
+           WHERE technique_name LIKE ?""",
+        (search_term,)
+    )["n"]
+
+    offset = (page - 1) * page_size
+    results = query(
+        """SELECT technique_id, technique_name,
+               GROUP_CONCAT(DISTINCT tactic_group) as tactic_groups,
+               COUNT(*) as control_count
+           FROM attack_technique_mappings
+           WHERE technique_name LIKE ?
+           GROUP BY technique_id, technique_name
+           ORDER BY technique_id
+           LIMIT ? OFFSET ?""",
+        (search_term, page_size, offset)
+    )
+
+    return {
+        "query": q,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": (total + page_size - 1) // page_size,
+        "techniques": results,
+    }
+
+
+@app.get("/attack/stats", tags=["attack"])
+def attack_stats():
+    """Summary statistics for the ATT&CK technique mappings."""
+    try:
+        total = query_one(
+            "SELECT COUNT(*) as n FROM attack_technique_mappings"
+        )["n"]
+        techniques = query_one(
+            "SELECT COUNT(DISTINCT technique_id) as n FROM attack_technique_mappings"
+        )["n"]
+        controls = query_one(
+            "SELECT COUNT(DISTINCT nist_control_id) as n FROM attack_technique_mappings"
+        )["n"]
+        by_family = query(
+            """SELECT tactic_group, COUNT(*) as mappings,
+                      COUNT(DISTINCT technique_id) as techniques
+               FROM attack_technique_mappings
+               GROUP BY tactic_group
+               ORDER BY mappings DESC"""
+        )
+        return {
+            "total_mappings": total,
+            "unique_techniques": techniques,
+            "unique_nist_controls": controls,
+            "by_nist_family": by_family,
+            "source": "CTID Mappings Explorer — ATT&CK 16.1 / NIST 800-53 Rev5",
+            "license": "Apache 2.0",
+        }
+    except Exception:
+        return {"total_mappings": 0, "message": "ATT&CK mappings not yet imported"}
