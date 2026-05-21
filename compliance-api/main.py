@@ -506,6 +506,23 @@ def list_attack_techniques(
     }
 
 
+@app.get("/attack/by-control/{control_id}", tags=["attack"])
+def get_techniques_by_control(control_id: str):
+    """Get all ATT&CK techniques mitigated by a specific NIST 800-53 control."""
+    techniques = query(
+        """SELECT technique_id, technique_name, tactic_group, comments
+           FROM attack_technique_mappings
+           WHERE nist_control_id = ?
+           ORDER BY technique_id""",
+        (control_id.upper(),)
+    )
+    return {
+        "nist_control_id": control_id.upper(),
+        "technique_count": len(techniques),
+        "techniques": techniques,
+    }
+
+
 @app.get("/attack/techniques/{technique_id}", tags=["attack"])
 def get_technique(technique_id: str):
     """
@@ -591,8 +608,8 @@ def search_techniques(
     total = query_one(
         """SELECT COUNT(DISTINCT technique_id) as n
            FROM attack_technique_mappings
-           WHERE technique_name LIKE ?""",
-        (search_term,)
+           WHERE technique_name LIKE ? OR technique_id LIKE ?""",
+        (search_term, search_term)
     )["n"]
 
     offset = (page - 1) * page_size
@@ -601,11 +618,11 @@ def search_techniques(
                GROUP_CONCAT(DISTINCT tactic_group) as tactic_groups,
                COUNT(*) as control_count
            FROM attack_technique_mappings
-           WHERE technique_name LIKE ?
+           WHERE technique_name LIKE ? OR technique_id LIKE ?
            GROUP BY technique_id, technique_name
            ORDER BY technique_id
            LIMIT ? OFFSET ?""",
-        (search_term, page_size, offset)
+        (search_term, search_term, page_size, offset)
     )
 
     return {
