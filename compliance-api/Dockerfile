@@ -8,18 +8,35 @@
 # The database is NOT included in the image — it is fetched from S3
 # by the Kubernetes init container on pod start.
 #
-# Image: ghcr.io/rsbailey/compliance-api:latest
+# Image: ghcr.io/necron-99/compliance-api:latest
 # Port:  8000
 # =============================================================================
 
-FROM python:3.12-slim
+# Stage 1 — build dependencies
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+RUN python -m venv /build/venv
+ENV PATH="/build/venv/bin:$PATH"
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Stage 2 — minimal runtime image
+FROM python:3.12-slim AS runtime
 
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY --from=builder /build/venv /app/venv
+
+# Rewrite shebangs from builder path to runtime path
+RUN find /app/venv/bin -type f | xargs grep -l "#!/build/venv" 2>/dev/null | \
+    xargs sed -i 's|#!/build/venv|#!/app/venv|g'
+
+ENV PATH="/app/venv/bin:$PATH"
 
 COPY main.py .
 
@@ -32,56 +49,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 EXPOSE 8000
 
-CMD ["python", "-m", "uvicorn", "main:app", \
+CMD ["uvicorn", "main:app", \
      "--host", "0.0.0.0", \
      "--port", "8000", \
-     "--workers", "2", \
+     "--workers", "1", \
      "--log-level", "info", \
      "--access-log"]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

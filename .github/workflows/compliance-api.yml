@@ -4,7 +4,7 @@
 # Builds and pushes the compliance API container image to GitHub Container
 # Registry (ghcr.io) on push to main when compliance-api files change.
 #
-# Image: ghcr.io/rsbailey/compliance-api:latest
+# Image: ghcr.io/necron-99/compliance-api:latest
 # Also tags with git SHA for immutable versioning.
 #
 # To trigger manually:
