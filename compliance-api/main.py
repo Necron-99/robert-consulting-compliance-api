@@ -230,7 +230,7 @@ def get_framework_controls(
     )["n"]
 
     if include_description:
-        cols = "id, framework_id, canonical_id, control_id, name, description, guidance"
+        cols = "id, framework_id, canonical_id, control_id, name, description, guidance, guidance_plain"
     else:
         cols = "id, framework_id, canonical_id, control_id, name"
 
