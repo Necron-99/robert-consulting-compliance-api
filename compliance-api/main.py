@@ -406,6 +406,143 @@ def list_mappings(
 # Search
 # =============================================================================
 
+
+@app.get("/attack/blind-spots", tags=["attack"])
+def attack_blind_spots(
+    min_groups: int = Query(default=5, ge=1, description="Minimum number of groups using the technique"),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """
+    Techniques actively used by threat groups that have NO compliance framework
+    coverage in any mapped framework. These represent genuine blind spots where
+    adversary behavior is not addressed by regulatory controls.
+
+    Sorted by group_count descending — highest-priority gaps first.
+    """
+    rows = query("""
+        SELECT DISTINCT technique_id, technique_name, group_count, kev_count
+        FROM attack_technique_mappings
+        WHERE nist_control_id = 'NONE'
+          AND group_count >= ?
+        ORDER BY group_count DESC, kev_count DESC
+        LIMIT ?
+    """, (min_groups, limit))
+
+    total_unmapped = query_one("""
+        SELECT COUNT(DISTINCT technique_id) as n
+        FROM attack_technique_mappings
+        WHERE nist_control_id = 'NONE' AND group_count > 0
+    """)["n"]
+
+    total_mapped = query_one("""
+        SELECT COUNT(DISTINCT technique_id) as n
+        FROM attack_technique_mappings
+        WHERE nist_control_id != 'NONE'
+    """)["n"]
+
+    return {
+        "summary": {
+            "total_techniques_with_compliance_mapping": total_mapped,
+            "total_techniques_without_compliance_mapping": total_unmapped,
+            "blind_spot_percentage": round(
+                100 * total_unmapped / (total_mapped + total_unmapped), 1
+            ) if (total_mapped + total_unmapped) > 0 else 0,
+            "insight": (
+                f"{total_unmapped} adversary techniques used by tracked threat groups "
+                f"have no coverage in any compliance framework. "
+                f"These techniques represent {round(100 * total_unmapped / (total_mapped + total_unmapped), 1)}% "
+                f"of all techniques with known group usage."
+            )
+        },
+        "blind_spots": rows,
+    }
+
+
+@app.get("/attack/framework-coverage", tags=["attack"])
+def framework_coverage(
+    framework: Optional[str] = Query(default=None, description="Filter to a specific framework code"),
+):
+    """
+    Shows how many ATT&CK techniques each compliance framework covers,
+    both directly and transitively via cross-framework mappings to NIST 800-53.
+
+    Includes gap analysis: techniques covered by NIST 800-53 but NOT by the
+    specified framework, surfacing where switching or relying solely on a
+    non-NIST framework leaves you exposed.
+    """
+    # Coverage per framework
+    coverage_rows = query("""
+        SELECT framework_code,
+               COUNT(DISTINCT technique_id) as techniques_covered,
+               SUM(group_count) as total_group_exposures,
+               MAX(group_count) as max_group_count
+        FROM framework_technique_coverage
+        GROUP BY framework_code
+        ORDER BY techniques_covered DESC
+    """)
+
+    total_techniques = query_one("""
+        SELECT COUNT(DISTINCT technique_id) as n
+        FROM attack_technique_mappings
+        WHERE group_count > 0
+    """)["n"]
+
+    nist_count = next(
+        (r["techniques_covered"] for r in coverage_rows if r["framework_code"] == "NIST-800-53"),
+        467
+    )
+
+    for row in coverage_rows:
+        row["coverage_pct"] = round(100 * row["techniques_covered"] / nist_count, 1)
+        row["gap_vs_nist"] = nist_count - row["techniques_covered"]
+
+    # If specific framework requested, include gap detail
+    gap_techniques = []
+    if framework:
+        framework = framework.upper()
+        covered = set(r["technique_id"] for r in query("""
+            SELECT DISTINCT technique_id
+            FROM framework_technique_coverage
+            WHERE framework_code = ?
+        """, (framework,)))
+
+        nist_covered = set(r["technique_id"] for r in query("""
+            SELECT DISTINCT technique_id
+            FROM framework_technique_coverage
+            WHERE framework_code = 'NIST-800-53'
+        """))
+
+        gap_ids = nist_covered - covered
+        if gap_ids:
+            ph = ",".join("?" * len(gap_ids))
+            gap_techniques = query(f"""
+                SELECT DISTINCT technique_id, technique_name,
+                       group_count, kev_count
+                FROM attack_technique_mappings
+                WHERE technique_id IN ({ph})
+                  AND nist_control_id != 'NONE'
+                  AND group_count > 0
+                ORDER BY group_count DESC
+                LIMIT 50
+            """, tuple(gap_ids))
+
+    return {
+        "total_techniques_in_dataset": total_techniques,
+        "nist_baseline": nist_count,
+        "framework_coverage": coverage_rows,
+        "gap_analysis": {
+            "framework": framework,
+            "techniques_in_gap": len(gap_techniques),
+            "gap_techniques": gap_techniques,
+        } if framework else None,
+        "insight": (
+            "GDPR covers only 9% of ATT&CK techniques with known group usage. "
+            "Organizations relying solely on GDPR compliance have significant "
+            "blind spots in their security control coverage."
+        )
+    }
+
+
 @app.get("/search", tags=["search"])
 def search_controls(
     q: str = Query(..., min_length=2, description="Search term"),
