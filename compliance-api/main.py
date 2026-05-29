@@ -420,7 +420,8 @@ def attack_blind_spots(
     Sorted by group_count descending — highest-priority gaps first.
     """
     rows = query("""
-        SELECT DISTINCT technique_id, technique_name, group_count, kev_count
+        SELECT DISTINCT technique_id, technique_name, group_count, kev_count,
+               tactic_names
         FROM attack_technique_mappings
         WHERE nist_control_id = 'NONE'
           AND group_count >= ?
@@ -440,20 +441,50 @@ def attack_blind_spots(
         WHERE nist_control_id != 'NONE'
     """)["n"]
 
+    # Tactic breakdown — split comma-separated tactic_names, count per tactic
+    tactic_rows = query("""
+        SELECT tactic_names, COUNT(DISTINCT technique_id) as technique_count,
+               SUM(group_count) as total_group_exposures
+        FROM attack_technique_mappings
+        WHERE nist_control_id = 'NONE' AND group_count > 0
+          AND tactic_names IS NOT NULL
+        GROUP BY tactic_names
+        ORDER BY technique_count DESC
+    """)
+
+    # Normalize — expand multi-tactic rows
+    tactic_agg = {}
+    for r in tactic_rows:
+        for tactic in r["tactic_names"].split(","):
+            tactic = tactic.strip()
+            if tactic not in tactic_agg:
+                tactic_agg[tactic] = {"tactic": tactic, "technique_count": 0, "group_exposures": 0}
+            tactic_agg[tactic]["technique_count"] += r["technique_count"]
+            tactic_agg[tactic]["group_exposures"] += r["total_group_exposures"]
+
+    tactic_breakdown = sorted(
+        tactic_agg.values(),
+        key=lambda x: x["technique_count"],
+        reverse=True
+    )
+
+    blind_spot_pct = round(
+        100 * total_unmapped / (total_mapped + total_unmapped), 1
+    ) if (total_mapped + total_unmapped) > 0 else 0
+
     return {
         "summary": {
             "total_techniques_with_compliance_mapping": total_mapped,
             "total_techniques_without_compliance_mapping": total_unmapped,
-            "blind_spot_percentage": round(
-                100 * total_unmapped / (total_mapped + total_unmapped), 1
-            ) if (total_mapped + total_unmapped) > 0 else 0,
+            "blind_spot_percentage": blind_spot_pct,
             "insight": (
                 f"{total_unmapped} adversary techniques used by tracked threat groups "
                 f"have no coverage in any compliance framework. "
-                f"These techniques represent {round(100 * total_unmapped / (total_mapped + total_unmapped), 1)}% "
+                f"These techniques represent {blind_spot_pct}% "
                 f"of all techniques with known group usage."
             )
         },
+        "tactic_breakdown": tactic_breakdown,
         "blind_spots": rows,
     }
 
@@ -517,7 +548,7 @@ def framework_coverage(
             ph = ",".join("?" * len(gap_ids))
             gap_techniques = query(f"""
                 SELECT DISTINCT technique_id, technique_name,
-                       group_count, kev_count
+                       group_count, kev_count, tactic_names
                 FROM attack_technique_mappings
                 WHERE technique_id IN ({ph})
                   AND nist_control_id != 'NONE'
